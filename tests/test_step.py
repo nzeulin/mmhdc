@@ -209,33 +209,35 @@ class TestCppVsPythonStepMNIST:
         py_total_s  = 0.0
         cpp_total_s = 0.0
 
-        for batch_idx in range(num_batches):
-            start = batch_idx * batch_size
-            end   = start + batch_size
-            X_batch = X_hd[start:end].to(py_model.device)
-            y_batch = y[start:end].to(py_model.device)
+        epochs = 10
+        for _ in range(epochs):  # just one epoch
+            for batch_idx in range(num_batches):
+                start = batch_idx * batch_size
+                end   = start + batch_size
+                X_batch = X_hd[start:end].to(py_model.device)
+                y_batch = y[start:end].to(py_model.device)
 
-            # Python step (updates py_model.prototypes in-place)
-            t0 = time.perf_counter()
-            py_model.step(X_batch, y_batch)
-            py_total_s += time.perf_counter() - t0
-            py_protos = py_model.prototypes.data.clone()
+                # Python step (updates py_model.prototypes in-place)
+                t0 = time.perf_counter()
+                py_model.step(X_batch, y_batch)
+                py_total_s += time.perf_counter() - t0
+                py_protos = py_model.prototypes.data.clone()
 
-            # C++ step: carry the output of the previous batch forward
-            t0 = time.perf_counter()
-            cpp_protos = _mmhdc_cpp.step(X_batch, y_batch, cpp_protos.clone(), self.LR, self.C)
-            cpp_total_s += time.perf_counter() - t0
+                # C++ step: carry the output of the previous batch forward
+                t0 = time.perf_counter()
+                cpp_protos = _mmhdc_cpp.step(X_batch, y_batch, cpp_protos.clone(), self.LR, self.C)
+                cpp_total_s += time.perf_counter() - t0
 
-            max_diff = (cpp_protos - py_protos).abs().max().item()
-            assert torch.allclose(cpp_protos, py_protos, atol=1e-5), (
-                f"C++ and Python prototypes diverge at batch "
-                f"{batch_idx + 1}/{num_batches} of the epoch on MNIST data. "
-                f"Max diff = {max_diff:.3e}"
-            )
+                max_diff = (cpp_protos - py_protos).abs().max().item()
+                assert torch.allclose(cpp_protos, py_protos, atol=1e-5), (
+                    f"C++ and Python prototypes diverge at batch "
+                    f"{batch_idx + 1}/{num_batches} of the epoch on MNIST data. "
+                    f"Max diff = {max_diff:.3e}"
+                )
 
         print(
             f"\n[test_epoch_matches_python] {num_batches} batches × {batch_size} samples"
-            f"\n  Python  mean: {py_total_s*1e3 / num_batches:.1f} ms"
-            f"\n  C++     mean: {cpp_total_s*1e3 / num_batches:.1f} ms"
+            f"\n  Python  mean: {py_total_s*1e3 / (num_batches*epochs):.1f} ms"
+            f"\n  C++     mean: {cpp_total_s*1e3 / (num_batches*epochs):.1f} ms"
             f"\n  Speedup:       {py_total_s / cpp_total_s:.2f}×"
         )
