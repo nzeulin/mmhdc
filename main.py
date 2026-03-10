@@ -74,6 +74,9 @@ def print_metrics_summary(epoch: int, experiment: int, metrics: Dict[str, Any]):
     print("\n" + "-" * 50)
 
 def main(_):
+    torch.random.manual_seed(0)
+    np.random.seed(0)
+
     config = FLAGS.config
     if config is None:
         raise ValueError("Configuration file must be provided.")

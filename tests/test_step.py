@@ -1,3 +1,4 @@
+import time
 import torch
 import pytest
 import sys
@@ -54,3 +55,187 @@ def test_step_updates_prototypes(step_inputs):
     assert not torch.equal(result, prototypes_before), (
         "step() returned prototypes identical to the input — no update occurred"
     )
+
+
+# ── Real-data convergence: C++ step vs Python step on MNIST ─────────────────
+
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+# Load all hyper-parameters from the project configs so that this test
+# automatically stays in sync whenever configs/default_mnist_config.py or
+# the referenced HDC config change.
+sys.path.insert(0, _REPO_ROOT)
+from importlib.util import spec_from_file_location, module_from_spec
+from configs.default_mnist_config import get_config as _get_main_config
+
+def _load_hdc_config(rel_path: str):
+    abs_path = os.path.join(_REPO_ROOT, rel_path)
+    spec = spec_from_file_location("_hdc_config", abs_path)
+    mod = module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.get_config()
+
+_MAIN_CFG = _get_main_config()
+_HDC_CFG  = _load_hdc_config(_MAIN_CFG.model_config_paths[0])
+
+
+@pytest.fixture(scope="module")
+def mnist_hd_data():
+    """
+    Load a subset of real MNIST and apply the HD transform defined in
+    default_mnist_config.py (onlinehd mapping, model_dim=5000).
+
+    Uses the first 500 training samples – enough to cover all 10 classes
+    while keeping fixture setup fast.
+    """
+    sys.path.insert(0, _REPO_ROOT)
+    from data import load_mnist
+    from hdc import HDTransform
+
+    # data/__init__.py resolves MNIST file paths relative to os.getcwd()
+    orig_cwd = os.getcwd()
+    os.chdir(_REPO_ROOT)
+    try:
+        X_raw, y_raw, _, _ = load_mnist("mnist")
+    finally:
+        os.chdir(orig_cwd)
+
+    # N = 500
+    X = torch.tensor(X_raw, dtype=torch.float32)
+    y = torch.tensor(y_raw, dtype=torch.int64)
+
+    # Flatten and apply HD transform – parameters come from default_mnist_config.py
+    X_flat = X.reshape(X.shape[0], -1)                                       # (N, 784)
+    transform = HDTransform(
+        in_channels=X_flat.shape[1],                                # 784
+        out_channels=_MAIN_CFG.dataset.model_dim,                   # dataset.model_dim
+        seed=0,
+        batch_size=1024,
+        transform_type=_MAIN_CFG.dataset.mapping,                   # dataset.mapping
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+    )
+    return transform(X_flat), y                                     # (N, model_dim), (N)
+
+
+class TestCppVsPythonStepMNIST:
+    """
+    Verify that the C++ step function produces numerically identical results
+    to the Python reference implementation when both are fed the same
+    hyperdimensional MNIST features.
+
+    Hyper-parameters are loaded at import time from:
+      • configs/default_mnist_config.py              – num_classes, model_dim, mapping
+      • configs/mnist/hdc/mmhdc_multi_config.py      – learning_rate, C
+    """
+
+    NUM_CLASSES = _MAIN_CFG.dataset.num_classes   # dataset.num_classes
+    MODEL_DIM   = _MAIN_CFG.dataset.model_dim     # dataset.model_dim
+    LR          = _HDC_CFG.learning_rate           # learning_rate
+    C           = float(_HDC_CFG.C)               # C
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    def _make_py_model(self):
+        from hdc.mmhdc import MultiMMHDC
+        return MultiMMHDC(
+            num_classes=self.NUM_CLASSES,
+            out_channels=self.MODEL_DIM,
+            lr=self.LR,
+            C=self.C,
+            backend="python",
+            device='cuda' if torch.cuda.is_available() else 'cpu',
+            dtype=torch.float32,
+        )
+
+    # ------------------------------------------------------------------
+    # tests
+    # ------------------------------------------------------------------
+
+    def test_single_step_matches_python(self, mnist_hd_data):
+        """
+        Shuffle the full dataset with a fixed seed, take the first batch
+        (batch size from training.batch_size in default_mnist_config.py),
+        and verify that C++ and Python produce identical prototypes after
+        that single step (atol=1e-5).
+        """
+        X_hd, y = mnist_hd_data
+        batch_size = _MAIN_CFG.training.batch_size   # training.batch_size
+
+        py_model = self._make_py_model()
+
+        # Shuffle with a fixed seed for reproducibility
+        rng = torch.Generator()
+        rng.manual_seed(0)
+        perm = torch.randperm(X_hd.shape[0], generator=rng)
+        X_batch = X_hd[perm[:batch_size]].to(py_model.device)
+        y_batch = y[perm[:batch_size]].to(py_model.device)
+
+        py_model.initialize(X_hd, y)
+        proto_init = py_model.prototypes.data.clone()
+
+        # Python reference step – modifies py_model.prototypes in-place
+        py_model.step(X_batch, y_batch)
+        py_protos = py_model.prototypes.data.clone()
+
+        # C++ step – returns the updated prototypes
+        cpp_protos = _mmhdc_cpp.step(X_batch, y_batch, proto_init.clone(), self.LR, self.C)
+
+        max_diff = (cpp_protos - py_protos).abs().max().item()
+        assert torch.allclose(cpp_protos, py_protos, atol=1e-5), (
+            f"C++ and Python prototypes diverge after 1 step on MNIST data. "
+            f"Max diff = {max_diff:.3e}"
+        )
+
+    def test_epoch_matches_python(self, mnist_hd_data):
+        """
+        Simulate one full training epoch with batches sized as in
+        default_mnist_config.py (training.batch_size).  After every batch
+        the C++ prototypes must equal the Python prototypes up to float32
+        rounding (atol=1e-5), verifying that errors do not accumulate across
+        the entire epoch.  Wall-clock time for each backend is reported.
+        """
+        X_hd, y = mnist_hd_data
+        batch_size = _MAIN_CFG.training.batch_size   # training.batch_size
+
+        py_model = self._make_py_model()
+        py_model.initialize(X_hd, y)
+
+        # C++ chain starts from the same initial prototypes
+        cpp_protos = py_model.prototypes.data.clone()
+
+        num_batches = (X_hd.shape[0] + batch_size - 1) // batch_size
+        py_total_s  = 0.0
+        cpp_total_s = 0.0
+
+        for batch_idx in range(num_batches):
+            start = batch_idx * batch_size
+            end   = start + batch_size
+            X_batch = X_hd[start:end].to(py_model.device)
+            y_batch = y[start:end].to(py_model.device)
+
+            # Python step (updates py_model.prototypes in-place)
+            t0 = time.perf_counter()
+            py_model.step(X_batch, y_batch)
+            py_total_s += time.perf_counter() - t0
+            py_protos = py_model.prototypes.data.clone()
+
+            # C++ step: carry the output of the previous batch forward
+            t0 = time.perf_counter()
+            cpp_protos = _mmhdc_cpp.step(X_batch, y_batch, cpp_protos.clone(), self.LR, self.C)
+            cpp_total_s += time.perf_counter() - t0
+
+            max_diff = (cpp_protos - py_protos).abs().max().item()
+            assert torch.allclose(cpp_protos, py_protos, atol=1e-5), (
+                f"C++ and Python prototypes diverge at batch "
+                f"{batch_idx + 1}/{num_batches} of the epoch on MNIST data. "
+                f"Max diff = {max_diff:.3e}"
+            )
+
+        print(
+            f"\n[test_epoch_matches_python] {num_batches} batches × {batch_size} samples"
+            f"\n  Python  mean: {py_total_s*1e3 / num_batches:.1f} ms"
+            f"\n  C++     mean: {cpp_total_s*1e3 / num_batches:.1f} ms"
+            f"\n  Speedup:       {py_total_s / cpp_total_s:.2f}×"
+        )
