@@ -54,7 +54,7 @@ class MultiMMHDC(torch.nn.Module):
     
     def step(self, x: torch.Tensor, y: torch.Tensor):
         if self.backend == 'cpp':
-            return _mmhdc_cpp.step(x, y, self.prototypes, self.lr, self.C)
+            self.prototypes.data = _mmhdc_cpp.step(x, y, self.prototypes, self.lr, self.C)
         elif self.backend == 'python':
             return self._py_step(x, y)
 

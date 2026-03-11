@@ -1,67 +1,48 @@
 #include <torch/extension.h>
 
 /*
-Optimised step procedure:
-  1. Pre-sort x/y by class label once → O(1) contiguous slice per class,
-     eliminates K boolean masks and K nonzero() calls.
-  2. Build wrong-prototype diff matrix directly (no roll, no extra allocation).
-  3. Fuse correct-class update: any_violated @ x_cls (one GEMV).
-  4. Vectorise inner wrong-class loop: mask_f.t() @ x_cls (one GEMM)
-     + a single index_add_ scatter — replaces the serial per-wrong-class loop.
+Optimised step procedure — global GEMM reformulation:
+
+  All per-class loops are eliminated. The entire batch is handled with
+  exactly two GEMMs regardless of the number of classes K:
+
+    1. scores   = x @ prototypes.T          (N, K)  — one GEMM
+    2. W        built from the boolean margin-violation mask (N, K)
+    3. update   = W.T @ x                   (K, D)  — one GEMM
+
+  This maximises GPU utilisation (two large, dense kernels instead of K
+  small ones) and removes all GPU→CPU syncs (.item() calls).
 */
 
 torch::Tensor step(torch::Tensor &x, torch::Tensor &y, torch::Tensor &prototypes, float lr, float C) {
-    auto num_classes = prototypes.size(0);
-    auto prototypes_update = torch::zeros_like(prototypes);
-    auto device = x.device();
+    // scores[i, k] = x_i · w_k  for every sample and every class.
+    auto scores = torch::mm(x, prototypes.t());                    // (N, K)
 
-    // Pre-sort by class label so each class occupies a contiguous slice.
-    auto sorted_idx = torch::argsort(y);
-    auto x_sorted   = x.index_select(0, sorted_idx);
-    auto y_sorted   = y.index_select(0, sorted_idx);
+    // correct_scores[i] = x_i · w_{y_i}
+    auto correct_scores = scores.gather(1, y.unsqueeze(1));        // (N, 1)
 
-    // Compute per-class start/end offsets via bincount.
-    auto counts  = torch::bincount(y_sorted, /*weights=*/{}, /*minlength=*/num_classes);
-    auto offsets = torch::zeros(num_classes + 1,
-                                torch::TensorOptions().dtype(torch::kInt64).device(device));
-    offsets.slice(0, 1) = torch::cumsum(counts, 0);
+    // margin_gap[i, k] = x_i · w_{y_i} - x_i · w_k
+    //                  = correct_score_i  - score_{i,k}
+    // Margin is violated when gap < 2  (and k ≠ y_i).
+    auto violated = (correct_scores - scores) < 2;                 // (N, K) bool
 
-    // Index vector [0, 1, ..., K-1] reused every iteration.
-    auto all_cls_idx = torch::arange(num_classes,
-                                     torch::TensorOptions().dtype(torch::kInt64).device(device));
+    // Zero out the diagonal: a sample cannot violate a margin against its own class.
+    violated.scatter_(1, y.unsqueeze(1),
+                      torch::zeros_like(y.unsqueeze(1), torch::kBool));
 
-    for (int64_t cls = 0; cls < num_classes; ++cls) {
-        auto start = offsets[cls].item<int64_t>();
-        auto end   = offsets[cls + 1].item<int64_t>();
-        if (start == end) continue;  // class absent from this batch
+    // Build weight matrix W  (N, K):
+    //   W[i, k]   = -1  if sample i violates margin against class k
+    //   W[i, y_i] = +1  if sample i violates at least one margin
+    //               (matches the Python reference: one contribution per sample,
+    //                not one per violated class)
+    auto W = -violated.to(x.scalar_type());                        // (N, K)
+    W.scatter_add_(1, y.unsqueeze(1),
+                   violated.any(1, /*keepdim=*/true).to(x.scalar_type()));
 
-        // Contiguous slice — no scatter-gather.
-        auto x_cls = x_sorted.slice(0, start, end);  // (N_cls, D)
+    // prototypes_update[k] = Σ_i  W[i,k] * x_i  — single GEMM.
+    auto prototypes_update = torch::mm(W.t(), x);                  // (K, D)
 
-        // Wrong-prototype indices in the original prototype matrix.
-        auto wrong_indices = all_cls_idx.masked_select(all_cls_idx != cls);  // (K-1,)
-
-        // Build pairwise diff: p_correct - p_wrong_k for each k. No roll needed.
-        auto p_wrong = prototypes.index_select(0, wrong_indices);            // (K-1, D)
-        auto diff    = prototypes[cls].unsqueeze(0) - p_wrong;               // (K-1, D)
-
-        // dot_product[i, k] = x_cls[i] · (p_correct - p_wrong_k)
-        auto dot_product      = torch::mm(x_cls, diff.t());                  // (N_cls, K-1)
-        auto exceeding_margin = torch::relu(2 - dot_product) > 0;            // (N_cls, K-1) bool
-        auto mask_f           = exceeding_margin.to(x.scalar_type());        // (N_cls, K-1) float
-
-        // Correct-class update: sum x_cls rows where any margin is violated.
-        // any_violated[i] = 1 iff sample i violates at least one margin.
-        auto any_violated = exceeding_margin.any(1).to(x.scalar_type());     // (N_cls,) float
-        prototypes_update[cls] += torch::mv(x_cls.t(), any_violated);        // (D,)
-
-        // Wrong-class updates: one GEMM replaces the serial inner loop.
-        // neg_updates[k] = sum of x_cls rows where exceeding_margin[:, k] is true.
-        auto neg_updates = torch::mm(mask_f.t(), x_cls);                     // (K-1, D)
-        prototypes_update.index_add_(0, wrong_indices, -neg_updates);
-    }
-
-    // Regularised prototype update.
+    // Regularised update.
     prototypes = (1 - lr / C) * prototypes + lr * prototypes_update;
     return prototypes;
 }
