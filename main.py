@@ -32,24 +32,12 @@ def save_checkpoint(checkpoint_path: str,
 def evaluate_model(model, X_test: torch.Tensor, y_test: torch.Tensor):
     """Evaluate model and return metrics."""
     with torch.no_grad():
-        X_test = X_test.to(model.device)
-        y_test = y_test.to(model.device)
-
         y_pred = model(X_test)
-        loss = model.loss(X_test, y_test) if hasattr(model, 'loss') else None
-
-        y_true_np = y_test.cpu().numpy() if isinstance(y_test, torch.Tensor) else y_test
-        y_pred_np = y_pred.cpu().numpy() if isinstance(y_pred, torch.Tensor) else y_pred
-
-        accuracy = np.mean(y_pred_np == y_true_np)
-        f1_per_class = f1_score(y_true_np, y_pred_np, average=None)
-        f1_avg = f1_score(y_true_np, y_pred_np, average='macro')
+        accuracy = (y_pred == y_test).float().mean().item()
 
         return {
             'accuracy': accuracy,
-            'loss': loss,
-            'f1_per_class': f1_per_class.tolist(),
-            'f1_avg': f1_avg
+            # 'loss': loss,
         }
 
 def load_model_config(config_path: str):
@@ -118,9 +106,9 @@ def main(_):
             device=config.device,
             transform_type=config.dataset.mapping
         )
-        X_train_hd = hd_transform(X_train_flat).to(config.device)
+        X_train_hd = hd_transform(X_train_flat)
         X_test_hd = hd_transform(X_test_flat).to(config.device)
-        y_train_exp = y_train.clone().to(config.device)
+        y_train_exp = y_train.clone()
         y_test_exp = y_test.clone().to(config.device)
 
         # Initialize the model
@@ -129,7 +117,8 @@ def main(_):
             num_classes=config.dataset.num_classes,
             lr=model_config.learning_rate,
             C=model_config.C,
-            device=config.device)
+            device=config.device,
+            backend=model_config.backend)
         model.initialize(X_train_hd, y_train_exp)
 
         # Training loop

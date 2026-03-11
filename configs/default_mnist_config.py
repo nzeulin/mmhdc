@@ -20,7 +20,7 @@ def get_config():
     training = config.training
     training.shuffle = True
     training.batch_size = 1000
-    training.num_epochs = 5
+    training.num_epochs = 50
     training.eval_every = 1  # Evaluate every N epochs
     training.checkpoint_every = 2  # Save checkpoint every N epochs
     training.num_experiments = 2
