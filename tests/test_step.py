@@ -82,11 +82,7 @@ _HDC_CFG  = _load_hdc_config(_MAIN_CFG.model_config_paths[0])
 @pytest.fixture(scope="module")
 def mnist_hd_data():
     """
-    Load a subset of real MNIST and apply the HD transform defined in
-    default_mnist_config.py (onlinehd mapping, model_dim=5000).
-
-    Uses the first 500 training samples – enough to cover all 10 classes
-    while keeping fixture setup fast.
+    Fixture for loading MNIST dataset.
     """
     sys.path.insert(0, _REPO_ROOT)
     from data import load_mnist
@@ -155,10 +151,7 @@ class TestCppVsPythonStepMNIST:
 
     def test_single_step_matches_python(self, mnist_hd_data):
         """
-        Shuffle the full dataset with a fixed seed, take the first batch
-        (batch size from training.batch_size in default_mnist_config.py),
-        and verify that C++ and Python produce identical prototypes after
-        that single step (atol=1e-5).
+        Test to verify that C++ and Python implementations of step() return identical prototypes.
         """
         X_hd, y = mnist_hd_data
         batch_size = _MAIN_CFG.training.batch_size   # training.batch_size
@@ -190,19 +183,10 @@ class TestCppVsPythonStepMNIST:
 
     def test_epoch_matches_python(self, mnist_hd_data):
         """
-        Simulate one full training epoch with batches sized as in
-        default_mnist_config.py (training.batch_size).  After every batch
-        the C++ prototypes must equal the Python prototypes up to float32
-        rounding (atol=1e-4), verifying that errors do not accumulate across
-        the entire epoch.  Wall-clock time for each backend is reported.
-
-        Note: the global GEMM reformulation sums all classes in a single pass,
-        which changes the float32 summation order relative to the per-class
-        Python loop.  Both are mathematically correct; atol=1e-4 accommodates
-        the resulting ~1e-5 rounding difference.
+        Test to verify that C++ and Python step implementations produce identical prototypes after several training epochs.
         """
         X_hd, y = mnist_hd_data
-        batch_size = _MAIN_CFG.training.batch_size   # training.batch_size
+        batch_size = _MAIN_CFG.training.batch_size
 
         py_model = self._make_py_model()
         py_model.initialize(X_hd, y)
@@ -233,16 +217,19 @@ class TestCppVsPythonStepMNIST:
                 cpp_protos = _mmhdc_cpp.step(X_batch, y_batch, cpp_protos.clone(), self.LR, self.C)
                 cpp_total_s += time.perf_counter() - t0
 
-                # Correctness is verified over epoch 0 only; subsequent epochs
-                # are run purely to produce stable timing averages.
-                if epoch == 0:
+                # NOTE: This can slightly diverge from the reference Python implementation,
+                # as it seems that C++ implementation has some reformulation of the loss computation.
+                # This is why I set epoch < 5, as the maximum difference can get a bit higher than the tolerance,
+                # but it doesn't get very high. Need to figure out myself why, but keep it for now.
+                if epoch < 5:
                     max_diff = (cpp_protos - py_protos).abs().max().item()
                     assert torch.allclose(cpp_protos, py_protos, atol=1e-4), (
                         f"C++ and Python prototypes diverge at batch "
                         f"{batch_idx + 1}/{num_batches} of the epoch on MNIST data. "
                         f"Max diff = {max_diff:.3e}"
-                    )
+                )
 
+        # Checking speedup from using C++ implementation
         print(
             f"\n[test_epoch_matches_python] {num_batches} batches × {batch_size} samples"
             f"\n  Python  mean: {py_total_s*1e3 / (num_batches*epochs):.1f} ms"

@@ -60,6 +60,8 @@ class MultiMMHDC(torch.nn.Module):
 
     def _py_step(self, x: torch.Tensor, y: torch.Tensor):
         # Step procedure for floating-point data types
+        # TODO: Revise implementation to avoid nested for-loops (similar to C++). Can be used for demonstration purposes, 
+        # but not suitable for actual training.
         def _py_step_float(x: torch.Tensor, y: torch.Tensor):
             # Computing hinge loss
             prototypes_update = torch.zeros_like(self.prototypes, dtype=self.dtype)
@@ -80,11 +82,6 @@ class MultiMMHDC(torch.nn.Module):
                     prototypes_update[(y_true + 1 + cls) % self.num_classes] -= x_cls[exceeding_margin[:, y_true]].sum(0)
             
             self.prototypes.data = (1 - self.lr / self.C) * self.prototypes.data + self.lr * prototypes_update
-
-            # Normalizing prototypes
-            # eps = 1e-8 * torch.ones(self.prototypes.size(0), 1, device=self.prototypes.device)
-            # self.prototypes /= torch.maximum(eps, torch.norm(self.prototypes, dim=1, keepdim=True))
-            # self.prototypes *= 10
 
             return loss
 
