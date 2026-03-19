@@ -1,0 +1,38 @@
+name: Automated testing with pytest
+
+on:
+  push:
+    branches:
+      - main
+      - bug/**
+      - testing/**
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Miniconda
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          auto-update-conda: true
+          activate-environment: mm-hdc
+          environment-file: environment.yaml
+          python-version: 3.11
+
+      - name: Show environment info
+        shell: bash -el {0}
+        run: |
+          python --version
+          conda info
+          conda list
+
+      - name: Run pytest
+        shell: bash -el {0}
+        run: pytest -q
