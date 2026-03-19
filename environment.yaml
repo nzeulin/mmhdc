@@ -18,3 +18,4 @@ dependencies:
   # Needed for torch C++ extension build in hdc/__init__.py
   - ninja
   - gxx_linux-64
+  - pybind11
