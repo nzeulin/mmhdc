@@ -7,11 +7,13 @@ from typing import Any, Dict
 from sklearn.preprocessing import LabelEncoder
 from sklearn.metrics import f1_score
 from importlib.util import spec_from_file_location, module_from_spec
-from hdc import HDTransform
 from data import load_mnist
 from ml_collections import ConfigDict
 from tqdm import tqdm
+
+import hdc
 from hdc.mmhdc import MultiMMHDC
+from hdc import HDTransform
 
 FLAGS = flags.FLAGS
 config_flags.DEFINE_config_file("config", None, "Path to configuration.")
@@ -30,24 +32,12 @@ def save_checkpoint(checkpoint_path: str,
 def evaluate_model(model, X_test: torch.Tensor, y_test: torch.Tensor):
     """Evaluate model and return metrics."""
     with torch.no_grad():
-        X_test = X_test.to(model.device)
-        y_test = y_test.to(model.device)
-
         y_pred = model(X_test)
-        loss = model.loss(X_test, y_test) if hasattr(model, 'loss') else None
-
-        y_true_np = y_test.cpu().numpy() if isinstance(y_test, torch.Tensor) else y_test
-        y_pred_np = y_pred.cpu().numpy() if isinstance(y_pred, torch.Tensor) else y_pred
-
-        accuracy = np.mean(y_pred_np == y_true_np)
-        f1_per_class = f1_score(y_true_np, y_pred_np, average=None)
-        f1_avg = f1_score(y_true_np, y_pred_np, average='macro')
+        accuracy = (y_pred == y_test).float().mean().item()
 
         return {
             'accuracy': accuracy,
-            'loss': loss,
-            'f1_per_class': f1_per_class.tolist(),
-            'f1_avg': f1_avg
+            # 'loss': loss,
         }
 
 def load_model_config(config_path: str):
@@ -72,6 +62,9 @@ def print_metrics_summary(epoch: int, experiment: int, metrics: Dict[str, Any]):
     print("\n" + "-" * 50)
 
 def main(_):
+    torch.random.manual_seed(0)
+    np.random.seed(0)
+
     config = FLAGS.config
     if config is None:
         raise ValueError("Configuration file must be provided.")
@@ -79,6 +72,7 @@ def main(_):
     checkpoints_dir = config.paths.checkpoints
     checkpoints_meta_dir = config.paths.checkpoints_meta
     results_dir = config.paths.results
+    dtype = config.dtype
 
     os.makedirs(checkpoints_dir, exist_ok=True)
     os.makedirs(checkpoints_meta_dir, exist_ok=True)
@@ -86,8 +80,8 @@ def main(_):
 
     # Load and preprocess data
     X_train, y_train, X_test, y_test = load_mnist(config.dataset.name)
-    X_train = torch.tensor(X_train, dtype=torch.float32)
-    X_test = torch.tensor(X_test, dtype=torch.float32)
+    X_train = torch.tensor(X_train, dtype=dtype)
+    X_test = torch.tensor(X_test, dtype=dtype)
 
     lbl_enc = LabelEncoder().fit(y_train)
     y_train = torch.tensor(lbl_enc.transform(y_train), dtype=torch.int64)
@@ -111,11 +105,12 @@ def main(_):
             seed=exp_i,
             batch_norm=False,
             device=config.device,
-            transform_type=config.dataset.mapping
+            transform_type=config.dataset.mapping,
+            dtype=dtype,
         )
-        X_train_hd = hd_transform(X_train_flat).to(config.device)
+        X_train_hd = hd_transform(X_train_flat)
         X_test_hd = hd_transform(X_test_flat).to(config.device)
-        y_train_exp = y_train.clone().to(config.device)
+        y_train_exp = y_train.clone()
         y_test_exp = y_test.clone().to(config.device)
 
         # Initialize the model
@@ -124,7 +119,9 @@ def main(_):
             num_classes=config.dataset.num_classes,
             lr=model_config.learning_rate,
             C=model_config.C,
-            device=config.device)
+            device=config.device,
+            backend=model_config.backend,
+            dtype=dtype,)
         model.initialize(X_train_hd, y_train_exp)
 
         # Training loop
@@ -143,7 +140,6 @@ def main(_):
                 batch_X = X_train_hd_shuf[i:i + config.training.batch_size].to(model.device)
                 batch_y = y_train_shuf[i:i + config.training.batch_size].to(model.device)
                 model.step(batch_X, batch_y)
-                # step_fn(model, batch_X, batch_y)
 
             if epoch % config.training.eval_every == 0:
                 metrics = evaluate_model(model, X_test_hd, y_test_exp)

@@ -1,3 +1,4 @@
+import torch
 from ml_collections import ConfigDict
 from torch.cuda import is_available as cuda_available
 import os
@@ -20,7 +21,7 @@ def get_config():
     training = config.training
     training.shuffle = True
     training.batch_size = 1000
-    training.num_epochs = 5
+    training.num_epochs = 50
     training.eval_every = 1  # Evaluate every N epochs
     training.checkpoint_every = 2  # Save checkpoint every N epochs
     training.num_experiments = 2
@@ -40,5 +41,6 @@ def get_config():
 
     # Device
     config.device = 'cuda'
+    config.dtype = torch.float32
 
     return config
