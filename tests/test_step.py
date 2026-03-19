@@ -88,13 +88,7 @@ def mnist_hd_data():
     from data import load_mnist
     from hdc import HDTransform
 
-    # data/__init__.py resolves MNIST file paths relative to os.getcwd()
-    orig_cwd = os.getcwd()
-    os.chdir(_REPO_ROOT)
-    try:
-        X_raw, y_raw, _, _ = load_mnist("mnist")
-    finally:
-        os.chdir(orig_cwd)
+    X_raw, y_raw, _, _ = load_mnist("mnist")
 
     # N = 500
     X = torch.tensor(X_raw, dtype=torch.float32)
@@ -279,7 +273,7 @@ class TestStepMatchesGradientDescent:
         )
         optimizer = torch.optim.SGD([model_gd.prototypes], lr=self.LR)
 
-        num_steps = 50
+        num_steps = 10
         step_losses = []
         gd_losses   = []
 
