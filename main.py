@@ -76,7 +76,6 @@ def main(_):
     # Load model config (single model only)
     assert len(config.model_config_paths) == 1, "Only one model config is supported."
     model_config = load_model_config(config.model_config_paths[0])
-    transform_dtype = model_config.get("transform_dtype", None) or dtype
     transform_batch_size = model_config.get("transform_batch_size", None)
 
     tracking = {}
