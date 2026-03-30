@@ -8,7 +8,7 @@ class MultiMMHDC(torch.nn.Module):
                  lr: float = 1e-2, 
                  C: float = 1.0, 
                  device: str = 'cpu',
-                 backend: str = 'cpp',
+                 backend: str = 'python',
                  dtype: torch.dtype = torch.float32):
         
         super().__init__()
@@ -29,21 +29,12 @@ class MultiMMHDC(torch.nn.Module):
     
     # Initialization of prototypes
     def initialize(self, x: torch.Tensor, y: torch.Tensor):
-        def _initialize_float(x: torch.Tensor, y: torch.Tensor):
-            for i in range(self.num_classes):
-                self.prototypes[i] = torch.mean(x[y.squeeze() == i], 0).to(self.device)
+        for i in range(self.num_classes):
+            self.prototypes[i] = torch.mean(x[y.squeeze() == i], 0).to(self.device)
 
-            # Normalizing prototypes
-            eps = 1e-8 * torch.ones(self.prototypes.size(0), 1, device=self.prototypes.device, dtype=self.dtype)
-            self.prototypes /= torch.maximum(eps, torch.norm(self.prototypes, dim=1, keepdim=True))
-
-        def _initialize_int(x: torch.Tensor, y: torch.Tensor):
-            pass
-
-        if self.dtype in [torch.float32, torch.float64]:
-            _initialize_float(x, y)
-        elif self.dtype in [torch.int8, torch.int16, torch.int32, torch.int64]:
-            _initialize_int(x, y)
+        # Normalizing prototypes
+        eps = 1e-8 * torch.ones(self.prototypes.size(0), 1, device=self.prototypes.device, dtype=self.dtype)
+        self.prototypes /= torch.maximum(eps, torch.norm(self.prototypes, dim=1, keepdim=True))
 
     def loss(self, X: torch.Tensor, y: torch.Tensor):
         loss = torch.pow(torch.norm(self.prototypes, dim=-1), 2).sum() / (2 * self.C)
@@ -56,16 +47,14 @@ class MultiMMHDC(torch.nn.Module):
         if self.backend == 'cpp':
             self.prototypes.data = _mmhdc_cpp.step(x, y, self.prototypes, self.lr, self.C)
         elif self.backend == 'python':
-            return self._py_step(x, y)
+            self._py_step(x, y)
+        else:
+            raise ValueError(f"Unsupported backend '{self.backend}'. Expected 'cpp' or 'python'.")
 
-    def _py_step(self, x: torch.Tensor, y: torch.Tensor):
-        # Step procedure for floating-point data types
-        # TODO: Revise implementation to avoid nested for-loops (similar to C++). Can be used for demonstration purposes, 
-        # but not suitable for actual training.
-        def _py_step_float(x: torch.Tensor, y: torch.Tensor):
-            # Computing hinge loss
+    def _py_step(self, x: torch.Tensor, y: torch.Tensor, optimized=True):
+        # This implementation is for reference purpose only. Use matrix-based optimized C++ and Python implementations
+        def _py_step_reference(x: torch.Tensor, y: torch.Tensor):
             prototypes_update = torch.zeros_like(self.prototypes, dtype=self.dtype)
-            loss = self.loss(x, y)
             for cls in y.unique():
                 rolled_prototypes = torch.roll(self.prototypes, -cls.item(), dims=0)
                 x_cls = x[y == cls]
@@ -82,14 +71,19 @@ class MultiMMHDC(torch.nn.Module):
                     prototypes_update[(y_true + 1 + cls) % self.num_classes] -= x_cls[exceeding_margin[:, y_true]].sum(0)
             
             self.prototypes.data = (1 - self.lr / self.C) * self.prototypes.data + self.lr * prototypes_update
+        
+        # Optimized code based on the C++ implementation logic
+        def _py_step_optimized(x: torch.Tensor, y: torch.Tensor):
+            scores = x @ self.prototypes.T
+            correct_scores = scores.gather(1, y.unsqueeze(1))
 
-            return loss
+            violated = (correct_scores - scores) < 2
+            violated.scatter_(1, y.unsqueeze(1), False)
 
-        # Step procedure for integer data types
-        def _py_step_int(x: torch.Tensor, y: torch.Tensor):
-            pass
+            W = -violated.to(x.dtype)
+            W.scatter_add_(1, y.unsqueeze(1), violated.sum(dim=1, keepdim=True).to(x.dtype))
 
-        if self.dtype in [torch.float32, torch.float64]:
-            return _py_step_float(x, y)
-        elif self.dtype in [torch.int8, torch.int16, torch.int32, torch.int64]:
-            return _py_step_int(x, y)
+            prototypes_update = W.T @ x
+            self.prototypes.data = (1 - self.lr / self.C) * self.prototypes.data + self.lr * prototypes_update
+
+        _py_step_reference(x, y) if not optimized else _py_step_optimized(x, y)
