@@ -15,9 +15,12 @@ You can install the package in editable mode and run the MNIST example as follow
 git clone https://github.com/nzeulin/mm-hdc.git
 cd mm-hdc
 python -m pip install --upgrade pip
-python -m pip install ".[examples]"
-python example.py --config configs/examples/mnist.py
+python -m pip install -e .
+python -m pip install -r example/requirements.txt
+python example/example.py --config configs/examples/mnist.py
 ```
+
+C++ backend is highly recommended to use, as it can significantly accelerate the model training. In this case, use `python -m pip install -e .[cpp]`.
 
 ### Current features
 - C++ backend (`libtorch`) to enable fast MM-HDC training.

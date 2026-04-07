@@ -14,30 +14,10 @@ authors = [
 ]
 dependencies = [
   "torch",
-  "ninja",
 ]
 
 [project.optional-dependencies]
-examples = [
-  "absl-py",
-  "ml-collections",
-  "ninja",
-  "torchvision",
-  "tqdm",
-]
-experiments = [
-  "absl-py",
-  "ml-collections",
-  "ninja",
-  "torchvision",
-  "tqdm",
-]
-test = [
-  "ml-collections",
-  "ninja",
-  "pytest",
-  "torchvision",
-]
+cpp = ["ninja"]
 
 [tool.setuptools]
 package-dir = { "" = "src" }

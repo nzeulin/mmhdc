@@ -1,7 +1,7 @@
 from absl import app, flags
 from ml_collections.config_flags import config_flags
 import os
-from typing import Dict
+from typing import Any, Dict
 import torch
 from data import load_mnist
 from tqdm import tqdm
