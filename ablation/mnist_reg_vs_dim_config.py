@@ -25,9 +25,9 @@ def get_config():
     config.model.backend = "cpp"
 
     config.sweep = ConfigDict()
-    config.sweep.model_dims = [250, 1_000]
-    # config.sweep.regularization_constants = [1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3, 1e4]
-    config.sweep.regularization_constants = [1e-3, 1e0, 1e3]
+    config.sweep.model_dims = [250, 500, 1_000, 2_500, 5_000]
+    config.sweep.regularization_constants = [1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3, 1e4]
+    # config.sweep.regularization_constants = [1e-3, 1e0, 1e3]
 
     config.paths = ConfigDict()
     config.paths.results = "results/ablation"
