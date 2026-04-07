@@ -4,7 +4,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from configs.examples.mnist import get_config as _get_main_config
+from example.mnist_config import get_config as _get_main_config
 from data import load_mnist
 from mmhdc import MultiMMHDC
 from mmhdc.utils import HDTransform
