@@ -1,0 +1,4 @@
+ml-collections
+ninja
+pytest
+torchvision
